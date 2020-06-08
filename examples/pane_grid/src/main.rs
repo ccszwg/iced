@@ -97,13 +97,13 @@ impl Sandbox for Example {
 
         let pane_grid =
             PaneGrid::new(&mut self.panes, |pane, content, focus| {
-                content.view(pane, focus, total_panes)
+                pane_grid::Content::new(content.view(pane, focus, total_panes))
             })
             .width(Length::Fill)
             .height(Length::Fill)
             .spacing(10)
             .on_drag(Message::Dragged)
-            .on_resize(Message::Resized)
+            .on_resize(10, Message::Resized)
             .on_key_press(handle_hotkey);
 
         Container::new(pane_grid)

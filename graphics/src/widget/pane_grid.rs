@@ -14,8 +14,8 @@ use iced_native::pane_grid;
 use iced_native::{Element, Layout, Point, Rectangle, Vector};
 
 pub use iced_native::pane_grid::{
-    Axis, Direction, DragEvent, Focus, KeyPressEvent, Pane, ResizeEvent, Split,
-    State,
+    Axis, Configuration, Content, Direction, DragEvent, Focus, KeyPressEvent,
+    Pane, ResizeEvent, Split, State, TitleBar,
 };
 
 /// A collection of panes distributed using either vertical or horizontal splits
@@ -34,8 +34,8 @@ where
     fn draw<Message>(
         &mut self,
         defaults: &Self::Defaults,
-        content: &[(Pane, Element<'_, Message, Self>)],
-        dragging: Option<Pane>,
+        content: &[(Pane, Content<'_, Message, Self>)],
+        dragging: Option<(Pane, Point)>,
         resizing: Option<Axis>,
         layout: Layout<'_>,
         cursor_position: Point,
@@ -63,32 +63,40 @@ where
                     mouse_interaction = new_mouse_interaction;
                 }
 
-                if Some(*id) == dragging {
-                    dragged_pane = Some((i, layout));
+                if let Some((dragging, origin)) = dragging {
+                    if *id == dragging {
+                        dragged_pane = Some((i, layout, origin));
+                    }
                 }
 
                 primitive
             })
             .collect();
 
-        let primitives = if let Some((index, layout)) = dragged_pane {
+        let primitives = if let Some((index, layout, origin)) = dragged_pane {
             let pane = panes.remove(index);
             let bounds = layout.bounds();
+
+            if let Primitive::Group { primitives } = &pane {
+                panes.push(
+                    primitives.first().cloned().unwrap_or(Primitive::None),
+                );
+            }
 
             // TODO: Fix once proper layering is implemented.
             // This is a pretty hacky way to achieve layering.
             let clip = Primitive::Clip {
                 bounds: Rectangle {
-                    x: cursor_position.x - bounds.width / 2.0,
-                    y: cursor_position.y - bounds.height / 2.0,
+                    x: cursor_position.x - origin.x,
+                    y: cursor_position.y - origin.y,
                     width: bounds.width + 0.5,
                     height: bounds.height + 0.5,
                 },
                 offset: Vector::new(0, 0),
                 content: Box::new(Primitive::Translate {
                     translation: Vector::new(
-                        cursor_position.x - bounds.x - bounds.width / 2.0,
-                        cursor_position.y - bounds.y - bounds.height / 2.0,
+                        cursor_position.x - bounds.x - origin.x,
+                        cursor_position.y - bounds.y - origin.y,
                     ),
                     content: Box::new(pane),
                 }),
@@ -114,5 +122,110 @@ where
                 mouse_interaction
             },
         )
+    }
+
+    fn draw_pane<Message>(
+        &mut self,
+        defaults: &Self::Defaults,
+        bounds: Rectangle,
+        style_sheet: &Self::Style,
+        title_bar: Option<(&TitleBar<'_, Message, Self>, Layout<'_>)>,
+        body: (&Element<'_, Message, Self>, Layout<'_>),
+        cursor_position: Point,
+    ) -> Self::Output {
+        let style = style_sheet.style();
+        let (body, body_layout) = body;
+
+        let (body_primitive, body_interaction) =
+            body.draw(self, defaults, body_layout, cursor_position);
+
+        let background = crate::widget::container::background(bounds, &style);
+
+        if let Some((title_bar, title_bar_layout)) = title_bar {
+            let show_controls = bounds.contains(cursor_position);
+            let is_over_draggable =
+                title_bar.is_over_draggable(title_bar_layout, cursor_position);
+
+            let (title_bar_primitive, title_bar_interaction) = title_bar.draw(
+                self,
+                defaults,
+                title_bar_layout,
+                cursor_position,
+                show_controls,
+            );
+
+            (
+                Primitive::Group {
+                    primitives: vec![
+                        background.unwrap_or(Primitive::None),
+                        title_bar_primitive,
+                        body_primitive,
+                    ],
+                },
+                if is_over_draggable {
+                    mouse::Interaction::Grab
+                } else if title_bar_interaction > body_interaction {
+                    title_bar_interaction
+                } else {
+                    body_interaction
+                },
+            )
+        } else {
+            (
+                if let Some(background) = background {
+                    Primitive::Group {
+                        primitives: vec![background, body_primitive],
+                    }
+                } else {
+                    body_primitive
+                },
+                body_interaction,
+            )
+        }
+    }
+
+    fn draw_title_bar<Message>(
+        &mut self,
+        defaults: &Self::Defaults,
+        bounds: Rectangle,
+        style_sheet: &Self::Style,
+        title: (&Element<'_, Message, Self>, Layout<'_>),
+        controls: Option<(&Element<'_, Message, Self>, Layout<'_>)>,
+        cursor_position: Point,
+    ) -> Self::Output {
+        let style = style_sheet.style();
+        let (title, title_layout) = title;
+
+        let background = crate::widget::container::background(bounds, &style);
+
+        let (title_primitive, _) =
+            title.draw(self, defaults, title_layout, cursor_position);
+
+        if let Some((controls, controls_layout)) = controls {
+            let (controls_primitive, controls_interaction) =
+                controls.draw(self, defaults, controls_layout, cursor_position);
+
+            (
+                Primitive::Group {
+                    primitives: vec![
+                        background.unwrap_or(Primitive::None),
+                        title_primitive,
+                        controls_primitive,
+                    ],
+                },
+                controls_interaction,
+            )
+        } else {
+            (
+                if let Some(background) = background {
+                    Primitive::Group {
+                        primitives: vec![background, title_primitive],
+                    }
+                } else {
+                    title_primitive
+                },
+                mouse::Interaction::default(),
+            )
+        }
     }
 }

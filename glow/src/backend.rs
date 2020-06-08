@@ -9,9 +9,10 @@ use iced_graphics::Primitive;
 use iced_native::mouse;
 use iced_native::{Font, HorizontalAlignment, Size, VerticalAlignment};
 
-/// A [`glow`] renderer.
+/// A [`glow`] graphics backend for [`iced`].
 ///
 /// [`glow`]: https://github.com/grovesNL/glow
+/// [`iced`]: https://github.com/hecrj/iced
 #[derive(Debug)]
 pub struct Backend {
     quad_pipeline: quad::Pipeline,
@@ -20,9 +21,9 @@ pub struct Backend {
 }
 
 impl Backend {
-    /// Creates a new [`Renderer`].
+    /// Creates a new [`Backend`].
     ///
-    /// [`Renderer`]: struct.Renderer.html
+    /// [`Backend`]: struct.Backend.html
     pub fn new(gl: &glow::Context, settings: Settings) -> Self {
         let text_pipeline = text::Pipeline::new(gl, settings.default_font);
         let quad_pipeline = quad::Pipeline::new(gl);
@@ -35,6 +36,10 @@ impl Backend {
         }
     }
 
+    /// Draws the provided primitives in the default framebuffer.
+    ///
+    /// The text provided as overlay will be rendered on top of the primitives.
+    /// This is useful for rendering debug information.
     pub fn draw<T: AsRef<str>>(
         &mut self,
         gl: &glow::Context,
@@ -70,7 +75,7 @@ impl Backend {
         layer: &Layer<'_>,
         target_height: u32,
     ) {
-        let mut bounds = (layer.bounds * scale_factor).round();
+        let mut bounds = (layer.bounds * scale_factor).snap();
         bounds.height = bounds.height.min(target_height);
 
         if !layer.quads.is_empty() {

@@ -9,24 +9,28 @@
 //! [`pane_grid` example]: https://github.com/hecrj/iced/tree/0.1/examples/pane_grid
 //! [`PaneGrid`]: struct.PaneGrid.html
 mod axis;
+mod configuration;
 mod content;
 mod direction;
 mod node;
 mod pane;
 mod split;
 mod state;
+mod title_bar;
 
 pub use axis::Axis;
+pub use configuration::Configuration;
 pub use content::Content;
 pub use direction::Direction;
 pub use node::Node;
 pub use pane::Pane;
 pub use split::Split;
 pub use state::{Focus, State};
+pub use title_bar::TitleBar;
 
 use crate::{
-    keyboard, layout, mouse, Clipboard, Element, Event, Hasher, Layout, Length,
-    Point, Size, Widget,
+    container, keyboard, layout, mouse, row, Clipboard, Element, Event, Hasher,
+    Layout, Length, Point, Rectangle, Size, Widget,
 };
 
 /// A collection of panes distributed using either vertical or horizontal splits
@@ -70,32 +74,35 @@ use crate::{
 ///
 /// let pane_grid =
 ///     PaneGrid::new(&mut state, |pane, state, focus| {
-///         match state {
+///         pane_grid::Content::new(match state {
 ///             PaneState::SomePane => Text::new("This is some pane"),
 ///             PaneState::AnotherKindOfPane => Text::new("This is another kind of pane"),
-///         }.into()
+///         })
 ///     })
 ///     .on_drag(Message::PaneDragged)
-///     .on_resize(Message::PaneResized);
+///     .on_resize(10, Message::PaneResized);
 /// ```
 ///
 /// [`PaneGrid`]: struct.PaneGrid.html
 /// [`State`]: struct.State.html
 #[allow(missing_debug_implementations)]
-pub struct PaneGrid<'a, Message, Renderer> {
+pub struct PaneGrid<'a, Message, Renderer: container::Renderer> {
     state: &'a mut state::Internal,
     pressed_modifiers: &'a mut keyboard::ModifiersState,
-    elements: Vec<(Pane, Element<'a, Message, Renderer>)>,
+    elements: Vec<(Pane, Content<'a, Message, Renderer>)>,
     width: Length,
     height: Length,
     spacing: u16,
     modifier_keys: keyboard::ModifiersState,
     on_drag: Option<Box<dyn Fn(DragEvent) -> Message + 'a>>,
-    on_resize: Option<Box<dyn Fn(ResizeEvent) -> Message + 'a>>,
+    on_resize: Option<(u16, Box<dyn Fn(ResizeEvent) -> Message + 'a>)>,
     on_key_press: Option<Box<dyn Fn(KeyPressEvent) -> Option<Message> + 'a>>,
 }
 
-impl<'a, Message, Renderer> PaneGrid<'a, Message, Renderer> {
+impl<'a, Message, Renderer> PaneGrid<'a, Message, Renderer>
+where
+    Renderer: container::Renderer,
+{
     /// Creates a [`PaneGrid`] with the given [`State`] and view function.
     ///
     /// The view function will be called to display each [`Pane`] present in the
@@ -110,7 +117,7 @@ impl<'a, Message, Renderer> PaneGrid<'a, Message, Renderer> {
             Pane,
             &'a mut T,
             Option<Focus>,
-        ) -> Element<'a, Message, Renderer>,
+        ) -> Content<'a, Message, Renderer>,
     ) -> Self {
         let elements = {
             let action = state.internal.action();
@@ -177,8 +184,8 @@ impl<'a, Message, Renderer> PaneGrid<'a, Message, Renderer> {
 
     /// Sets the modifier keys of the [`PaneGrid`].
     ///
-    /// The modifier keys will need to be pressed to trigger dragging, resizing,
-    /// and key events.
+    /// The modifier keys will need to be pressed to trigger dragging, and key
+    /// events.
     ///
     /// The default modifier key is `Ctrl`.
     ///
@@ -194,8 +201,6 @@ impl<'a, Message, Renderer> PaneGrid<'a, Message, Renderer> {
     /// Enables the drag and drop interactions of the [`PaneGrid`], which will
     /// use the provided function to produce messages.
     ///
-    /// Panes can be dragged using `Modifier keys + Left click`.
-    ///
     /// [`PaneGrid`]: struct.PaneGrid.html
     pub fn on_drag<F>(mut self, f: F) -> Self
     where
@@ -208,14 +213,15 @@ impl<'a, Message, Renderer> PaneGrid<'a, Message, Renderer> {
     /// Enables the resize interactions of the [`PaneGrid`], which will
     /// use the provided function to produce messages.
     ///
-    /// Panes can be resized using `Modifier keys + Right click`.
+    /// The `leeway` describes the amount of space around a split that can be
+    /// used to grab it.
     ///
     /// [`PaneGrid`]: struct.PaneGrid.html
-    pub fn on_resize<F>(mut self, f: F) -> Self
+    pub fn on_resize<F>(mut self, leeway: u16, f: F) -> Self
     where
         F: 'a + Fn(ResizeEvent) -> Message,
     {
-        self.on_resize = Some(Box::new(f));
+        self.on_resize = Some((leeway, Box::new(f)));
         self
     }
 
@@ -243,6 +249,45 @@ impl<'a, Message, Renderer> PaneGrid<'a, Message, Renderer> {
         self.on_key_press = Some(Box::new(f));
         self
     }
+}
+
+impl<'a, Message, Renderer> PaneGrid<'a, Message, Renderer>
+where
+    Renderer: self::Renderer,
+{
+    fn click_pane(
+        &mut self,
+        layout: Layout<'_>,
+        cursor_position: Point,
+        messages: &mut Vec<Message>,
+    ) {
+        let mut clicked_region =
+            self.elements.iter().zip(layout.children()).filter(
+                |(_, layout)| layout.bounds().contains(cursor_position),
+            );
+
+        if let Some(((pane, content), layout)) = clicked_region.next() {
+            match &self.on_drag {
+                Some(on_drag) => {
+                    if let Some(origin) =
+                        content.drag_origin(layout, cursor_position)
+                    {
+                        self.state.pick_pane(pane, origin);
+
+                        messages
+                            .push(on_drag(DragEvent::Picked { pane: *pane }));
+                    } else {
+                        self.state.focus(pane);
+                    }
+                }
+                None => {
+                    self.state.focus(pane);
+                }
+            }
+        } else {
+            self.state.unfocus();
+        }
+    }
 
     fn trigger_resize(
         &mut self,
@@ -250,7 +295,7 @@ impl<'a, Message, Renderer> PaneGrid<'a, Message, Renderer> {
         cursor_position: Point,
         messages: &mut Vec<Message>,
     ) {
-        if let Some(on_resize) = &self.on_resize {
+        if let Some((_, on_resize)) = &self.on_resize {
             if let Some((split, _)) = self.state.picked_split() {
                 let bounds = layout.bounds();
 
@@ -358,7 +403,7 @@ pub struct KeyPressEvent {
 impl<'a, Message, Renderer> Widget<'a, Message, Renderer>
     for PaneGrid<'a, Message, Renderer>
 where
-    Renderer: self::Renderer,
+    Renderer: self::Renderer + container::Renderer,
 {
     fn width(&self) -> Length {
         self.width
@@ -409,36 +454,49 @@ where
         match event {
             Event::Mouse(mouse_event) => match mouse_event {
                 mouse::Event::ButtonPressed(mouse::Button::Left) => {
-                    let mut clicked_region =
-                        self.elements.iter().zip(layout.children()).filter(
-                            |(_, layout)| {
-                                layout.bounds().contains(cursor_position)
-                            },
-                        );
+                    let bounds = layout.bounds();
 
-                    if let Some(((pane, _), _)) = clicked_region.next() {
-                        match &self.on_drag {
-                            Some(on_drag)
-                                if self
-                                    .pressed_modifiers
-                                    .matches(self.modifier_keys) =>
-                            {
-                                self.state.pick_pane(pane);
+                    if bounds.contains(cursor_position) {
+                        match self.on_resize {
+                            Some((leeway, _)) => {
+                                let relative_cursor = Point::new(
+                                    cursor_position.x - bounds.x,
+                                    cursor_position.y - bounds.y,
+                                );
 
-                                messages.push(on_drag(DragEvent::Picked {
-                                    pane: *pane,
-                                }));
+                                let splits = self.state.splits(
+                                    f32::from(self.spacing),
+                                    Size::new(bounds.width, bounds.height),
+                                );
+
+                                let clicked_split = hovered_split(
+                                    splits.iter(),
+                                    f32::from(self.spacing + leeway),
+                                    relative_cursor,
+                                );
+
+                                if let Some((split, axis)) = clicked_split {
+                                    self.state.pick_split(&split, axis);
+                                } else {
+                                    self.click_pane(
+                                        layout,
+                                        cursor_position,
+                                        messages,
+                                    );
+                                }
                             }
-                            _ => {
-                                self.state.focus(pane);
+                            None => {
+                                self.click_pane(
+                                    layout,
+                                    cursor_position,
+                                    messages,
+                                );
                             }
                         }
-                    } else {
-                        self.state.unfocus();
                     }
                 }
                 mouse::Event::ButtonReleased(mouse::Button::Left) => {
-                    if let Some(pane) = self.state.picked_pane() {
+                    if let Some((pane, _)) = self.state.picked_pane() {
                         self.state.focus(&pane);
 
                         if let Some(on_drag) = &self.on_drag {
@@ -462,77 +520,9 @@ where
 
                             messages.push(on_drag(event));
                         }
+                    } else if self.state.picked_split().is_some() {
+                        self.state.drop_split();
                     }
-                }
-                mouse::Event::ButtonPressed(mouse::Button::Right)
-                    if self.on_resize.is_some()
-                        && self.state.picked_pane().is_none()
-                        && self
-                            .pressed_modifiers
-                            .matches(self.modifier_keys) =>
-                {
-                    let bounds = layout.bounds();
-
-                    if bounds.contains(cursor_position) {
-                        let relative_cursor = Point::new(
-                            cursor_position.x - bounds.x,
-                            cursor_position.y - bounds.y,
-                        );
-
-                        let splits = self.state.splits(
-                            f32::from(self.spacing),
-                            Size::new(bounds.width, bounds.height),
-                        );
-
-                        let mut sorted_splits: Vec<_> = splits
-                            .iter()
-                            .filter(|(_, (axis, rectangle, _))| match axis {
-                                Axis::Horizontal => {
-                                    relative_cursor.x > rectangle.x
-                                        && relative_cursor.x
-                                            < rectangle.x + rectangle.width
-                                }
-                                Axis::Vertical => {
-                                    relative_cursor.y > rectangle.y
-                                        && relative_cursor.y
-                                            < rectangle.y + rectangle.height
-                                }
-                            })
-                            .collect();
-
-                        sorted_splits.sort_by_key(
-                            |(_, (axis, rectangle, ratio))| {
-                                let distance = match axis {
-                                    Axis::Horizontal => (relative_cursor.y
-                                        - (rectangle.y
-                                            + rectangle.height * ratio))
-                                        .abs(),
-                                    Axis::Vertical => (relative_cursor.x
-                                        - (rectangle.x
-                                            + rectangle.width * ratio))
-                                        .abs(),
-                                };
-
-                                distance.round() as u32
-                            },
-                        );
-
-                        if let Some((split, (axis, _, _))) =
-                            sorted_splits.first()
-                        {
-                            self.state.pick_split(split, *axis);
-                            self.trigger_resize(
-                                layout,
-                                cursor_position,
-                                messages,
-                            );
-                        }
-                    }
-                }
-                mouse::Event::ButtonReleased(mouse::Button::Right)
-                    if self.state.picked_split().is_some() =>
-                {
-                    self.state.drop_split();
                 }
                 mouse::Event::CursorMoved { .. } => {
                     self.trigger_resize(layout, cursor_position, messages);
@@ -576,7 +566,7 @@ where
             {
                 self.elements.iter_mut().zip(layout.children()).for_each(
                     |((_, pane), layout)| {
-                        pane.widget.on_event(
+                        pane.on_event(
                             event.clone(),
                             layout,
                             cursor_position,
@@ -597,11 +587,38 @@ where
         layout: Layout<'_>,
         cursor_position: Point,
     ) -> Renderer::Output {
-        renderer.draw(
+        let picked_split = self
+            .state
+            .picked_split()
+            .or_else(|| match self.on_resize {
+                Some((leeway, _)) => {
+                    let bounds = layout.bounds();
+
+                    let relative_cursor = Point::new(
+                        cursor_position.x - bounds.x,
+                        cursor_position.y - bounds.y,
+                    );
+
+                    let splits = self
+                        .state
+                        .splits(f32::from(self.spacing), bounds.size());
+
+                    hovered_split(
+                        splits.iter(),
+                        f32::from(self.spacing + leeway),
+                        relative_cursor,
+                    )
+                }
+                None => None,
+            })
+            .map(|(_, axis)| axis);
+
+        self::Renderer::draw(
+            renderer,
             defaults,
             &self.elements,
             self.state.picked_pane(),
-            self.state.picked_split().map(|(_, axis)| axis),
+            picked_split,
             layout,
             cursor_position,
         )
@@ -629,7 +646,7 @@ where
 ///
 /// [`PaneGrid`]: struct.PaneGrid.html
 /// [renderer]: ../../renderer/index.html
-pub trait Renderer: crate::Renderer + Sized {
+pub trait Renderer: crate::Renderer + container::Renderer + Sized {
     /// Draws a [`PaneGrid`].
     ///
     /// It receives:
@@ -645,10 +662,40 @@ pub trait Renderer: crate::Renderer + Sized {
     fn draw<Message>(
         &mut self,
         defaults: &Self::Defaults,
-        content: &[(Pane, Element<'_, Message, Self>)],
-        dragging: Option<Pane>,
+        content: &[(Pane, Content<'_, Message, Self>)],
+        dragging: Option<(Pane, Point)>,
         resizing: Option<Axis>,
         layout: Layout<'_>,
+        cursor_position: Point,
+    ) -> Self::Output;
+
+    /// Draws a [`Pane`].
+    ///
+    /// It receives:
+    /// - the [`TitleBar`] of the [`Pane`], if any
+    /// - the [`Content`] of the [`Pane`]
+    /// - the [`Layout`] of the [`Pane`] and its elements
+    /// - the cursor position
+    ///
+    /// [`Pane`]: struct.Pane.html
+    /// [`Layout`]: ../layout/struct.Layout.html
+    fn draw_pane<Message>(
+        &mut self,
+        defaults: &Self::Defaults,
+        bounds: Rectangle,
+        style: &Self::Style,
+        title_bar: Option<(&TitleBar<'_, Message, Self>, Layout<'_>)>,
+        body: (&Element<'_, Message, Self>, Layout<'_>),
+        cursor_position: Point,
+    ) -> Self::Output;
+
+    fn draw_title_bar<Message>(
+        &mut self,
+        defaults: &Self::Defaults,
+        bounds: Rectangle,
+        style: &Self::Style,
+        title: (&Element<'_, Message, Self>, Layout<'_>),
+        controls: Option<(&Element<'_, Message, Self>, Layout<'_>)>,
         cursor_position: Point,
     ) -> Self::Output;
 }
@@ -656,7 +703,7 @@ pub trait Renderer: crate::Renderer + Sized {
 impl<'a, Message, Renderer> From<PaneGrid<'a, Message, Renderer>>
     for Element<'a, Message, Renderer>
 where
-    Renderer: 'a + self::Renderer,
+    Renderer: 'a + self::Renderer + row::Renderer,
     Message: 'a,
 {
     fn from(
@@ -664,4 +711,26 @@ where
     ) -> Element<'a, Message, Renderer> {
         Element::new(pane_grid)
     }
+}
+
+/*
+ * Helpers
+ */
+fn hovered_split<'a>(
+    splits: impl Iterator<Item = (&'a Split, &'a (Axis, Rectangle, f32))>,
+    spacing: f32,
+    cursor_position: Point,
+) -> Option<(Split, Axis)> {
+    splits
+        .filter_map(|(split, (axis, region, ratio))| {
+            let bounds =
+                axis.split_line_bounds(*region, *ratio, f32::from(spacing));
+
+            if bounds.contains(cursor_position) {
+                Some((*split, *axis))
+            } else {
+                None
+            }
+        })
+        .next()
 }
